@@ -12,7 +12,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { RecipeIngredient } from "~/lib/api/types/recipe";
-import { useIngredientTextParser } from "~/composables/recipes";
+import { useIngredientTextParser, useSecondaryMeasure } from "~/composables/recipes";
 
 interface Props {
   ingredient?: RecipeIngredient;
@@ -21,11 +21,13 @@ interface Props {
 
 const { ingredient, scale = 1 } = defineProps<Props>();
 const { useParsedIngredientText } = useIngredientTextParser();
+const { secondaryMeasureText } = useSecondaryMeasure();
 
 const baseText = computed(() => {
   if (!ingredient) return "";
   const parsed = useParsedIngredientText(ingredient, scale);
-  return [parsed.quantity, parsed.unit, parsed.name].filter(Boolean).join(" ").trim();
+  const secondary = parsed.quantity ? secondaryMeasureText(ingredient, scale) : undefined;
+  return [parsed.quantity, parsed.unit, secondary && `(${secondary})`, parsed.name].filter(Boolean).join(" ").trim();
 });
 </script>
 

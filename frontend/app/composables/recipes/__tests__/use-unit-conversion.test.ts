@@ -3,7 +3,7 @@ import { makeWrapper } from "~/tests/utils";
 import type { CreateIngredientUnit, RecipeIngredient } from "~/lib/api/types/recipe";
 import { canConvertIngredient, useUnitConversion } from "../use-unit-conversion";
 
-const { convertIngredient } = makeWrapper(() => useUnitConversion());
+const { convertIngredient, secondaryMeasure } = makeWrapper(() => useUnitConversion());
 
 const ingredient = (quantity: number, unit: Partial<CreateIngredientUnit> | null): RecipeIngredient => ({
   quantity,
@@ -239,12 +239,13 @@ describe("convertIngredient", () => {
       expect(convertIngredient(grams(100), "us").unit?.useAbbreviation).toBe(true);
     });
 
-    test("drops the source unit's identity and standardization data", () => {
+    test("drops the source unit's identity and restandardizes on the new unit", () => {
       const converted = convertIngredient(grams(100), "us");
 
       expect(converted.unit?.id).toBeUndefined();
-      expect(converted.unit?.standardUnit).toBeUndefined();
-      expect(converted.unit?.standardQuantity).toBeUndefined();
+      // describes the ounce it now is, not the gram it came from
+      expect(converted.unit?.standardUnit).toBe("gram");
+      expect(converted.unit?.standardQuantity).toBeCloseTo(28.349523125, 6);
     });
   });
 
@@ -256,5 +257,90 @@ describe("convertIngredient", () => {
     expect(converted.referenceId).toBe("abc");
     expect(converted.food).toBe(input.food);
     expect(converted).not.toBe(input);
+  });
+});
+
+describe("secondaryMeasure", () => {
+  const withFood = (base: RecipeIngredient, extras: Record<string, string>): RecipeIngredient => ({
+    ...base,
+    food: { id: "1", name: "flour", extras },
+  });
+
+  const cups = (quantity: number) =>
+    ingredient(quantity, { name: "cup", standardUnit: "cup", standardQuantity: 1 });
+
+  const flour = { density_g_per_ml: "0.53" };
+
+  test("volume with a density reads as grams", () => {
+    // 1 cup is 236.6ml, at 0.53g/ml 125.4g
+    const secondary = secondaryMeasure(withFood(cups(1), flour));
+
+    expect(secondary?.unit?.name).toBe("gram");
+    expect(secondary?.quantity).toBe(125);
+  });
+
+  test("is computed from the scaled amount", () => {
+    // 250.8g at 2x
+    const secondary = secondaryMeasure(withFood(cups(1), flour), 2);
+
+    expect(secondary?.quantity).toBe(251);
+  });
+
+  test("grams keep three significant figures rather than conversion rounding", () => {
+    // a quarter cup of butter at 0.9637g/ml is 57.0g, which conversion rounding makes 58
+    expect(secondaryMeasure(withFood(cups(0.25), { density_g_per_ml: "0.9637" }))?.quantity).toBe(57);
+    // small amounts keep their decimal
+    expect(secondaryMeasure(withFood(ingredient(1, null), { grams_each: "3.37" }))?.quantity).toBe(3.37);
+  });
+
+  test("large weights move to kilograms", () => {
+    const secondary = secondaryMeasure(withFood(cups(10), flour));
+
+    expect(secondary?.unit?.name).toBe("kilogram");
+    expect(secondary?.quantity).toBe(1.25);
+  });
+
+  test("weight with a density reads as US volume", () => {
+    // 200g at 0.85g/ml is 235ml, a hair under a cup
+    const secondary = secondaryMeasure(withFood(grams(200), { density_g_per_ml: "0.85" }));
+
+    expect(secondary?.unit?.name).toBe("cup");
+    expect(secondary?.quantity).toBe(1);
+  });
+
+  test("a chosen unit system overrides the default", () => {
+    // 125.4g is 4.42oz, nearest kitchen fraction 4 1/2
+    const secondary = secondaryMeasure(withFood(cups(1), flour), 1, "us");
+
+    expect(secondary?.unit?.name).toBe("ounce");
+    expect(secondary?.quantity).toBe(4.5);
+  });
+
+  test("counted ingredients use grams each", () => {
+    const secondary = secondaryMeasure(withFood(ingredient(2, null), { grams_each: "50" }));
+
+    expect(secondary?.unit?.name).toBe("gram");
+    expect(secondary?.quantity).toBe(100);
+  });
+
+  test("a converted ingredient still has a secondary measure", () => {
+    const converted = convertIngredient(withFood(ounces(4), { density_g_per_ml: "1" }), "metric");
+    const secondary = secondaryMeasure(converted, 1, "metric");
+
+    expect(secondary?.unit?.name).toBe("milliliter");
+    expect(secondary?.quantity).toBeCloseTo(115, 6);
+  });
+
+  const missing: [string, RecipeIngredient][] = [
+    ["no extras", cups(1)],
+    ["unparseable density", withFood(cups(1), { density_g_per_ml: "abc" })],
+    ["zero density", withFood(cups(1), { density_g_per_ml: "0" })],
+    ["density but no standardized unit", withFood(ingredient(1, { name: "pinch" }), flour)],
+    ["grams each on a standardized unit", withFood(cups(1), { grams_each: "50" })],
+    ["no quantity", withFood(ingredient(0, null), { grams_each: "50" })],
+  ];
+
+  test.each(missing)("%s has none", (_label, input) => {
+    expect(secondaryMeasure(input)).toBeNull();
   });
 });

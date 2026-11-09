@@ -1,4 +1,4 @@
-import { CUSTOMARY_SYSTEMS, STANDARDIZED_UNITS, UNIT_SYSTEMS, type StandardizedUnit, type UnitRung, type UnitSystem } from "./unit-systems";
+import { CUSTOMARY_SYSTEMS, STANDARDIZED_UNITS, UNIT_SYSTEMS, type StandardizedUnit, type UnitDimension, type UnitRung, type UnitSystem } from "./unit-systems";
 import type { CreateIngredientUnit, RecipeIngredient } from "~/lib/api/types/recipe";
 
 interface ConvertibleIngredient {
@@ -48,6 +48,50 @@ function resolveConvertible(ingredient: RecipeIngredient): ConvertibleIngredient
 
 export function canConvertIngredient(ingredient: RecipeIngredient): boolean {
   return resolveConvertible(ingredient) !== null;
+}
+
+/** Food extras read for the secondary measure. Extras are strings on the wire. */
+export const DENSITY_EXTRA = "density_g_per_ml";
+export const GRAMS_EACH_EXTRA = "grams_each";
+
+function foodExtraNumber(ingredient: RecipeIngredient, key: string): number | null {
+  const raw = (ingredient.food?.extras as Record<string, unknown> | null | undefined)?.[key];
+  if (raw === null || raw === undefined || raw === "") {
+    return null;
+  }
+
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The scaled magnitude of an ingredient in the other dimension, via the food's density, or its
+ * grams per count for ingredients with no standardized unit (2 eggs, 3 cloves).
+ */
+function resolveSecondary(ingredient: RecipeIngredient, scale: number): { dimension: UnitDimension; magnitude: number } | null {
+  const convertible = resolveConvertible(ingredient);
+  if (convertible) {
+    const density = foodExtraNumber(ingredient, DENSITY_EXTRA);
+    if (!density) {
+      return null;
+    }
+
+    const base = convertible.quantity * convertible.standardQuantity * convertible.standard.base * scale;
+    return convertible.standard.dimension === "volume"
+      ? { dimension: "mass", magnitude: base * density }
+      : { dimension: "volume", magnitude: base / density };
+  }
+
+  const gramsEach = foodExtraNumber(ingredient, GRAMS_EACH_EXTRA);
+  if (!ingredient.quantity || !gramsEach) {
+    return null;
+  }
+
+  return { dimension: "mass", magnitude: ingredient.quantity * gramsEach * scale };
+}
+
+export function hasSecondaryMeasure(ingredient: RecipeIngredient): boolean {
+  return resolveSecondary(ingredient, 1) !== null;
 }
 
 /**
@@ -150,11 +194,14 @@ export function useUnitConversion() {
    * messages under `unit-names`. That data is already translated into every locale Mealie
    * ships, so nothing here is authored per-locale.
    */
-  function unitFromRung(rung: UnitRung): CreateIngredientUnit {
+  function unitFromRung(rung: UnitRung, dimension: UnitDimension): CreateIngredientUnit {
     const key = `unit-names.${rung.seedKey}`;
     const abbreviation = t(`${key}.abbreviation`);
 
     return {
+      // Kept standardized so a converted ingredient can still yield its secondary measure
+      standardUnit: dimension === "mass" ? "gram" : "milliliter",
+      standardQuantity: rung.base,
       name: t(`${key}.name`),
       pluralName: t(`${key}.plural_name`),
       abbreviation,
@@ -203,9 +250,33 @@ export function useUnitConversion() {
     return {
       ...ingredient,
       quantity: displayed / scale,
-      unit: unitFromRung(rung),
+      unit: unitFromRung(rung, standard.dimension),
     };
   }
 
-  return { convertIngredient };
+  /**
+   * The ingredient's amount in the other dimension, already scaled: grams beside a cup of flour,
+   * cups beside 200g of sugar. Null when the food has no density or grams-per-count to go on.
+   *
+   * Defaults to grams for weight and US measures for volume; a chosen unit system overrides both.
+   * Display only, like convertIngredient. The result carries no food or note.
+   */
+  function secondaryMeasure(ingredient: RecipeIngredient, scale = 1, system: UnitSystem | null = null): RecipeIngredient | null {
+    const secondary = resolveSecondary(ingredient, scale);
+    if (!secondary) {
+      return null;
+    }
+
+    const { dimension, magnitude } = secondary;
+    const target = system ?? (dimension === "mass" ? "metric" : "us");
+    const { rung, quantity } = roundToRung(UNIT_SYSTEMS[target][dimension], magnitude);
+
+    // Decimal rungs keep 3 significant figures: this sits beside a weight the recipe states, and
+    // the conversion rounding (57g -> 58g) would read as disagreeing with it
+    const displayed = rung.fraction ? quantity : Number((magnitude / rung.base).toPrecision(3));
+
+    return { quantity: displayed, unit: unitFromRung(rung, dimension) };
+  }
+
+  return { convertIngredient, secondaryMeasure };
 }

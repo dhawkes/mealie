@@ -228,7 +228,7 @@ import { useStaticRoutes } from "~/composables/api";
 import type { Recipe, RecipeIngredient, RecipeStep } from "~/lib/api/types/recipe";
 import type { NoUndefinedField } from "~/lib/api/types/non-generated";
 import { ImagePosition, useUserPrintPreferences } from "~/composables/use-users/preferences";
-import { ingredientSubstitutionSummary, useFoodPlurality, useIngredientTextParser, useNutritionLabels } from "~/composables/recipes";
+import { ingredientSubstitutionSummary, useFoodPlurality, useIngredientTextParser, useNutritionLabels, useSecondaryMeasure } from "~/composables/recipes";
 import { usePageState } from "~/composables/recipe-page/shared-state";
 import { useScaledAmount } from "~/composables/recipes/use-scaled-amount";
 
@@ -419,10 +419,13 @@ const stepLinkedIngredients = computed(() => {
   return map;
 });
 
-const { parseIngredientText } = useIngredientTextParser();
+const { useParsedIngredientText } = useIngredientTextParser();
+const { secondaryMeasureText } = useSecondaryMeasure();
 
 function parseText(ingredient: RecipeIngredient) {
-  return parseIngredientText(ingredient, props.scale);
+  const { quantity, unit, name, note } = useParsedIngredientText(ingredient, props.scale);
+  const secondary = quantity ? secondaryMeasureText(ingredient, props.scale) : undefined;
+  return [quantity, unit, secondary && `(${secondary})`, name, note].filter(Boolean).join(" ");
 }
 
 const { shouldPluralizeFood } = useFoodPlurality();
